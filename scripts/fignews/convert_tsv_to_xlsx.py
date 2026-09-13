@@ -8,19 +8,24 @@ import pandas as pd
 
 
 ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "data" / "raw" / "fignews" / "FIGNEWS-2024-TEXT-MAIN.tsv"
-OUTPUT = (
-    ROOT
-    / "artifacts"
-    / "exports"
-    / "fignews"
-    / "FIGNEWS-2024-TEXT-MAIN-UNICODE.xlsx"
+RAW_DIR = ROOT / "data" / "raw" / "fignews"
+OUTPUT_DIR = ROOT / "artifacts" / "exports" / "fignews"
+
+FILES = (
+    "FIGNEWS-2024-TEXT-MAIN.tsv",
+    "FIGNEWS-2024-TEXT-IAA.tsv",
 )
 
 
-def main() -> None:
+def convert_file(filename: str) -> None:
+    source = RAW_DIR / filename
+    output = OUTPUT_DIR / filename.replace(
+        ".tsv",
+        "-UNICODE.xlsx",
+    )
+
     df = pd.read_csv(
-        SOURCE,
+        source,
         sep="\t",
         encoding="utf-8-sig",
         dtype=str,
@@ -30,10 +35,18 @@ def main() -> None:
     )
 
     all_text = " ".join(df.astype(str).to_numpy().ravel())
-    arabic_count = len(re.findall(r"[\u0600-\u06FF]", all_text))
-    hebrew_count = len(re.findall(r"[\u0590-\u05FF]", all_text))
-    corrupted_sequences = len(re.findall(r"\?{3,}", all_text))
 
+    arabic_count = len(
+        re.findall(r"[\u0600-\u06FF]", all_text)
+    )
+    hebrew_count = len(
+        re.findall(r"[\u0590-\u05FF]", all_text)
+    )
+    corrupted_sequences = len(
+        re.findall(r"\?{3,}", all_text)
+    )
+
+    print(f"\nSource: {source.name}")
     print(f"Rows: {len(df):,}")
     print(f"Arabic characters: {arabic_count:,}")
     print(f"Hebrew characters: {hebrew_count:,}")
@@ -41,14 +54,17 @@ def main() -> None:
 
     if arabic_count == 0 or hebrew_count == 0:
         raise RuntimeError(
-            "The input TSV does not contain detectable Arabic and Hebrew. "
-            "It may already be corrupted."
+            f"{source.name} does not contain detectable Arabic "
+            "and Hebrew characters. It may already be corrupted."
         )
 
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(
+            writer,
+            sheet_name="FIGNEWS",
+            index=False,
+        )
 
-    with pd.ExcelWriter(OUTPUT, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="FIGNEWS", index=False)
         worksheet = writer.book["FIGNEWS"]
         worksheet.freeze_panes = "A2"
         worksheet.auto_filter.ref = worksheet.dimensions
@@ -57,7 +73,14 @@ def main() -> None:
             column_letter = column[0].column_letter
             worksheet.column_dimensions[column_letter].width = 22
 
-    print(f"Created: {OUTPUT.resolve()}")
+    print(f"Created: {output}")
+
+
+def main() -> None:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    for filename in FILES:
+        convert_file(filename)
 
 
 if __name__ == "__main__":
