@@ -1,0 +1,2 @@
+"""FIGNEWS command-line utilities."""
+

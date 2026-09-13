@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+.venv/
+venv/
+.env
+
+# Generated data and reports stay local.
+data/processed/**
+!data/processed/.gitkeep
+!data/processed/fignews/
+!data/processed/fignews/.gitkeep
+
+artifacts/**
+!artifacts/.gitkeep
+!artifacts/profiles/
+!artifacts/profiles/.gitkeep
+!artifacts/exports/
+!artifacts/exports/.gitkeep
+!artifacts/exports/fignews/
+!artifacts/exports/fignews/.gitkeep
+

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import re
 from pathlib import Path
@@ -82,4 +83,5 @@ def read_delimited(path: str | Path) -> pd.DataFrame:
         sep=separator,
         dtype=str,
         keep_default_na=False,
+        quoting=csv.QUOTE_NONE,
     )

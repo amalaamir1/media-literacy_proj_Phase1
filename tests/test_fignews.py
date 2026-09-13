@@ -1,10 +1,11 @@
 import pandas as pd
 import pytest
 
-from social_literacy.data.fignews import (
+from data.fignews import (
     FignewsSchemaError,
     build_consensus_from_long,
     build_post_key,
+    read_source_texts,
     resolve_consensus,
 )
 
@@ -117,3 +118,18 @@ def test_missing_consensus_columns_raise_error() -> None:
         match="source_language",
     ):
         build_consensus_from_long(frame)
+
+
+def test_source_reader_treats_quotes_as_text(tmp_path) -> None:
+    source = tmp_path / "FIGNEWS-2024-TEXT-MAIN.tsv"
+    source.write_text(
+        "Batch\tSource Language\tID\tType\tText\tEnglish MT\tArabic MT\n"
+        'B01\tArabic\t1\tMAIN\t"نص عربي\tArabic text\tنص عربي\n',
+        encoding="utf-8",
+    )
+
+    frame = read_source_texts(source)
+
+    assert len(frame) == 1
+    assert frame.iloc[0]["text"] == '"نص عربي'
+    assert frame.iloc[0]["english_mt"] == "Arabic text"
