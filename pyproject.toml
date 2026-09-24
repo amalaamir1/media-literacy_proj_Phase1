@@ -4,14 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "media-literacy-phase1"
-version = "0.1.0"
-description = "Phase 1 FIGNEWS data preparation for the Social Media Literacy project"
+version = "0.2.0"
+description = "Phase 1 FIGNEWS data preparation and baseline modeling"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-  "pandas>=2.2,<3.0",
-  "pyarrow>=17,<22",
+  "pandas>=2.2,<3.1",
+  "pyarrow>=17,<26",
   "openpyxl>=3.1,<4.0",
+  "scikit-learn>=1.5,<2.0",
+  "joblib>=1.4,<2.0",
 ]
 
 [project.optional-dependencies]
@@ -24,4 +26,3 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
-
