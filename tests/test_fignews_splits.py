@@ -11,12 +11,14 @@ def sample_modeling_table() -> pd.DataFrame:
     for partition, count in (("MAIN", 40), ("IAA", 4)):
         for index in range(count):
             language = "Arabic" if index % 2 == 0 else "English"
-            post_key = f"B01::{language}::{index}::{partition}"
+            source_id = index if partition == "MAIN" else index + 1_000
+            post_key = f"B01::{language}::{source_id}::{partition}"
 
             for subtask in ("bias", "propaganda"):
                 rows.append(
                     {
                         "post_key": post_key,
+                        "post_uid": f"{language}::{source_id}",
                         "type": partition,
                         "source_language": language,
                         "subtask": subtask,
@@ -66,3 +68,15 @@ def test_duplicate_post_subtask_rows_are_rejected() -> None:
 
     with pytest.raises(FignewsSchemaError, match="Duplicate post/subtask"):
         build_split_manifest(frame)
+
+
+def test_manifest_with_extra_post_is_rejected() -> None:
+    frame = sample_modeling_table()
+    manifest = build_split_manifest(frame)
+    extra = manifest.iloc[[0]].copy()
+    extra["post_key"] = "B01::Arabic::not-in-modeling::MAIN"
+    extra["post_uid"] = "Arabic::not-in-modeling"
+    manifest = pd.concat([manifest, extra], ignore_index=True)
+
+    with pytest.raises(FignewsSchemaError, match="do not exactly match"):
+        attach_split_manifest(frame, manifest)

@@ -5,6 +5,8 @@ from data.fignews import (
     FignewsSchemaError,
     build_consensus_from_long,
     build_post_key,
+    build_post_uid,
+    read_long_annotations,
     read_source_texts,
     resolve_consensus,
 )
@@ -42,6 +44,14 @@ def test_post_key_groups_annotations() -> None:
 
     assert frame.loc[:2, "post_key"].nunique() == 1
     assert frame["post_key"].nunique() == 2
+
+
+def test_post_uid_uses_only_language_and_source_id() -> None:
+    frame = sample_long_annotations()
+    frame["post_uid"] = build_post_uid(frame)
+
+    assert frame.loc[0, "post_uid"] == "Arabic::10"
+    assert frame["post_uid"].nunique() == 2
 
 
 def test_unclear_wins_instead_of_being_removed() -> None:
@@ -123,8 +133,9 @@ def test_missing_consensus_columns_raise_error() -> None:
 def test_source_reader_treats_quotes_as_text(tmp_path) -> None:
     source = tmp_path / "FIGNEWS-2024-TEXT-MAIN.tsv"
     source.write_text(
-        "Batch\tSource Language\tID\tType\tText\tEnglish MT\tArabic MT\n"
-        'B01\tArabic\t1\tMAIN\t"نص عربي\tArabic text\tنص عربي\n',
+        "Batch\tSource Language\tID\tType\tText\tEnglish MT\tArabic MT\t"
+        "Annotator ID\tBias\tPropaganda\tComments\n"
+        'B01\tArabic\t1\tMAIN\t"نص عربي\tArabic text\tنص عربي\t\t\t\t\n',
         encoding="utf-8",
     )
 
@@ -133,3 +144,50 @@ def test_source_reader_treats_quotes_as_text(tmp_path) -> None:
     assert len(frame) == 1
     assert frame.iloc[0]["text"] == '"نص عربي'
     assert frame.iloc[0]["english_mt"] == "Arabic text"
+    assert "bias" not in frame.columns
+    assert "propaganda" not in frame.columns
+
+
+def test_long_reader_matches_real_release_schema(tmp_path) -> None:
+    source = tmp_path / "FIGNEWS-2024-ALL-CLEAN.tsv"
+    source.write_text(
+        "batch\tsource_language\tid\ttype\tteam_name\tsheet_type\t"
+        "annotator_id\ttask\tlabel\tNotes\n"
+        "B01\tArabic\t1\tMAIN\tteam\tmain\ta1\t"
+        "Propaganda Detection\tPropaganda\tchecked\n",
+        encoding="utf-8",
+    )
+
+    frame = read_long_annotations(source)
+
+    assert frame.iloc[0]["subtask"] == "propaganda"
+    assert frame.iloc[0]["label_normalized"] == "propaganda"
+    assert frame.iloc[0]["post_key"] == "B01::Arabic::1::MAIN"
+    assert frame.iloc[0]["post_uid"] == "Arabic::1"
+
+
+def test_long_reader_rejects_label_outside_task_taxonomy(tmp_path) -> None:
+    source = tmp_path / "FIGNEWS-2024-ALL-CLEAN.tsv"
+    source.write_text(
+        "batch\tsource_language\tid\ttype\tteam_name\tsheet_type\t"
+        "annotator_id\ttask\tlabel\tNotes\n"
+        "B01\tArabic\t1\tMAIN\tteam\tmain\ta1\t"
+        "Propaganda Detection\tUnbiased\tchecked\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FignewsSchemaError, match="outside the task taxonomy"):
+        read_long_annotations(source)
+
+
+def test_source_reader_rejects_schema_drift(tmp_path) -> None:
+    source = tmp_path / "FIGNEWS-2024-TEXT-MAIN.tsv"
+    source.write_text(
+        "Batch\tSource Language\tID\tType\tText\tEnglish MT\tArabic MT\t"
+        "Annotator ID\tBias\tPropaganda\tComments\tUnexpected\n"
+        "B01\tArabic\t1\tMAIN\ttext\tEnglish\tعربي\t\t\t\t\textra\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(FignewsSchemaError, match="schema mismatch"):
+        read_source_texts(source)

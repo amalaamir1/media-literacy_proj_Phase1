@@ -8,11 +8,14 @@ import pandas as pd
 
 from .common import (
     FignewsSchemaError,
+    build_post_uid,
     normalize_label,
     normalize_subtask,
 )
 from .constants import (
+    BIAS_LABELS,
     NOT_APPLICABLE_LABELS,
+    PROPAGANDA_LABELS,
     UNCERTAIN_LABELS,
 )
 
@@ -152,6 +155,8 @@ def build_consensus_from_long(
 ) -> pd.DataFrame:
     required = {
         "post_key",
+        "batch",
+        "id",
         "subtask",
         "label_normalized",
         "source_language",
@@ -165,18 +170,59 @@ def build_consensus_from_long(
             f"Long consensus input is missing columns: {missing}"
         )
 
+    working = frame.copy()
+    if "post_uid" not in working.columns:
+        working["post_uid"] = build_post_uid(working)
+
+    normalized_subtasks = working["subtask"].map(normalize_subtask)
+    unexpected_subtasks = sorted(
+        set(normalized_subtasks) - {"bias", "propaganda"}
+    )
+    if unexpected_subtasks:
+        raise FignewsSchemaError(
+            f"Long consensus input contains unexpected tasks: {unexpected_subtasks}"
+        )
+
+    allowed_labels = {
+        "bias": set(BIAS_LABELS),
+        "propaganda": set(PROPAGANDA_LABELS),
+    }
+    invalid = [
+        {
+            "subtask": task,
+            "label": normalize_label(label),
+        }
+        for task, label in zip(
+            normalized_subtasks,
+            working["label_normalized"],
+            strict=True,
+        )
+        if normalize_label(label) not in allowed_labels[task]
+    ]
+    if invalid:
+        raise FignewsSchemaError(
+            "Long consensus input contains labels outside the task taxonomy. "
+            f"Examples: {invalid[:5]}"
+        )
+
     records: list[dict[str, object]] = []
 
-    for (post_key, subtask), group in frame.groupby(
+    for (post_key, subtask), group in working.groupby(
         ["post_key", "subtask"],
         sort=True,
     ):
         first = group.iloc[0]
-        vote_counts = (
+        observed_counts = (
             group["label_normalized"]
             .value_counts(dropna=False)
             .to_dict()
         )
+        normalized_subtask = normalize_subtask(subtask)
+        taxonomy = BIAS_LABELS if normalized_subtask == "bias" else PROPAGANDA_LABELS
+        vote_counts = {
+            label: int(observed_counts.get(label, 0))
+            for label in taxonomy
+        }
 
         result = resolve_consensus(
             vote_counts,
@@ -188,7 +234,8 @@ def build_consensus_from_long(
         records.append(
             {
                 "post_key": post_key,
-                "subtask": normalize_subtask(subtask),
+                "post_uid": first["post_uid"],
+                "subtask": normalized_subtask,
                 "batch": first.get("batch"),
                 "source_language": first["source_language"],
                 "id": first.get("id"),
@@ -209,6 +256,7 @@ def build_consensus_from_flat(
 ) -> pd.DataFrame:
     required = {
         "post_key",
+        "post_uid",
         "batch",
         "source_language",
         "id",
@@ -244,6 +292,7 @@ def build_consensus_from_flat(
             records.append(
                 {
                     "post_key": row["post_key"],
+                    "post_uid": row["post_uid"],
                     "subtask": subtask,
                     "batch": row["batch"],
                     "source_language": row["source_language"],

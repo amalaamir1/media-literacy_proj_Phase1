@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 
@@ -25,7 +26,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-fraction", type=float, default=0.20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--min-stratum-size", type=int, default=5)
+    parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_fingerprint(manifest: pd.DataFrame) -> str:
+    canonical = manifest.sort_values("post_key").to_csv(
+        index=False,
+        lineterminator="\n",
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _nested_counts(frame: pd.DataFrame, first: str, second: str) -> dict[str, object]:
@@ -60,12 +78,40 @@ def main() -> None:
     manifest_csv = args.output_dir / "split_manifest.csv"
     modeling_output = args.output_dir / "modeling_table_with_splits.parquet"
 
+    output_paths = [
+        manifest_parquet,
+        manifest_csv,
+        modeling_output,
+        args.profile,
+    ]
+    existing = [path for path in output_paths if path.exists()]
+    if existing and not args.overwrite:
+        raise FileExistsError(
+            "Refusing to overwrite existing outputs: "
+            f"{[str(path) for path in existing]}. Use --overwrite explicitly."
+        )
+
     manifest.to_parquet(manifest_parquet, index=False)
     manifest.to_csv(manifest_csv, index=False, encoding="utf-8-sig")
     modeling_with_splits.to_parquet(modeling_output, index=False)
 
+    split_post_sets = {
+        split: set(manifest.loc[manifest["split"].eq(split), "post_key"])
+        for split in ("train", "validation", "test")
+    }
+    has_overlap = bool(
+        split_post_sets["train"] & split_post_sets["validation"]
+        or split_post_sets["train"] & split_post_sets["test"]
+        or split_post_sets["validation"] & split_post_sets["test"]
+    )
+
     profile = {
+        "schema_version": 1,
+        "input_path": str(args.input),
+        "input_sha256": _sha256(args.input),
+        "manifest_content_sha256": _manifest_fingerprint(manifest),
         "unique_posts": int(len(manifest)),
+        "unique_post_uids": int(manifest["post_uid"].nunique()),
         "modeling_rows": int(len(modeling_with_splits)),
         "posts_by_split": manifest["split"].value_counts().to_dict(),
         "modeling_rows_by_split": (
@@ -89,7 +135,8 @@ def main() -> None:
         "partition_by_split": _nested_counts(manifest, "split", "type"),
         "random_seed": args.seed,
         "validation_fraction": args.validation_fraction,
-        "post_key_overlap_between_splits": False,
+        "min_stratum_size": args.min_stratum_size,
+        "post_key_overlap_between_splits": has_overlap,
     }
     args.profile.write_text(
         json.dumps(profile, indent=2, ensure_ascii=False),

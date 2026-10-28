@@ -1,4 +1,4 @@
-from .common import FignewsSchemaError, build_post_key
+from .common import FignewsSchemaError, build_post_key, build_post_uid
 from .consensus import (
     build_consensus_from_flat,
     build_consensus_from_long,
@@ -21,6 +21,7 @@ __all__ = [
     "build_consensus_from_long",
     "build_fignews_modeling_table",
     "build_post_key",
+    "build_post_uid",
     "join_consensus_with_text",
     "read_flat_votes",
     "read_long_annotations",

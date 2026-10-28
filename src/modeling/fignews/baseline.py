@@ -13,6 +13,7 @@ from typing import Literal
 import joblib
 import pandas as pd
 import sklearn
+from data.fignews.constants import BIAS_LABELS, PROPAGANDA_LABELS
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
@@ -30,15 +31,28 @@ TextRepresentation = Literal[
 REQUIRED_COLUMNS = frozenset(
     {
         "post_key",
+        "post_uid",
         "subtask",
         "consensus_status",
         "consensus_label",
         "source_language",
+        "type",
         "split",
         "text",
+        "evidence_tier",
     }
 )
 EXPECTED_SPLITS = frozenset({"train", "validation", "test"})
+TASK_LABEL_ORDER = {
+    "bias": list(BIAS_LABELS[:5]),
+    "propaganda": list(PROPAGANDA_LABELS[:2]),
+}
+DEFAULT_ELIGIBLE_EVIDENCE_TIERS = (
+    "bronze_single",
+    "silver_consensus",
+    "gold_iaa",
+)
+KNOWN_EVIDENCE_TIERS = frozenset(DEFAULT_ELIGIBLE_EVIDENCE_TIERS)
 
 
 class BaselineDataError(ValueError):
@@ -57,6 +71,7 @@ class BaselineConfig:
     max_iter: int = 2_000
     c_values: tuple[float, ...] = (0.5, 1.0, 2.0)
     ngram_ranges: tuple[tuple[int, int], ...] = ((1, 1), (1, 2))
+    eligible_evidence_tiers: tuple[str, ...] = DEFAULT_ELIGIBLE_EVIDENCE_TIERS
 
 
 @dataclass(frozen=True)
@@ -126,6 +141,20 @@ def prepare_task_frame(
     if missing:
         raise BaselineDataError(f"Modeling table is missing columns: {missing}")
 
+    if config.task not in TASK_LABEL_ORDER:
+        raise BaselineDataError(f"Unsupported task: {config.task}")
+
+    eligible_evidence_tiers = {
+        str(value).strip().lower() for value in config.eligible_evidence_tiers
+    }
+    if not eligible_evidence_tiers:
+        raise BaselineDataError("eligible_evidence_tiers cannot be empty")
+    unknown_policy_tiers = sorted(eligible_evidence_tiers - KNOWN_EVIDENCE_TIERS)
+    if unknown_policy_tiers:
+        raise BaselineDataError(
+            f"Unknown eligible evidence tiers: {unknown_policy_tiers}"
+        )
+
     frame = modeling_table.loc[
         modeling_table["subtask"].astype(str).str.lower().eq(config.task)
         & modeling_table["consensus_status"]
@@ -133,14 +162,44 @@ def prepare_task_frame(
         .str.lower()
         .eq("accepted")
     ].copy()
+    frame["evidence_tier"] = (
+        frame["evidence_tier"].astype(str).str.strip().str.lower()
+    )
+    unexpected_data_tiers = sorted(set(frame["evidence_tier"]) - KNOWN_EVIDENCE_TIERS)
+    if unexpected_data_tiers:
+        raise BaselineDataError(
+            f"Accepted rows contain unexpected evidence tiers: {unexpected_data_tiers}"
+        )
 
     frame["consensus_label"] = (
         frame["consensus_label"].fillna("").astype(str).str.strip().str.lower()
     )
-    frame = frame.loc[frame["consensus_label"].ne("")].copy()
+    missing_labels = frame["consensus_label"].eq("")
+    if missing_labels.any():
+        examples = frame.loc[missing_labels, "post_key"].head(5).tolist()
+        raise BaselineDataError(
+            f"Accepted rows are missing consensus labels. Examples: {examples}"
+        )
+
+    expected_labels = set(TASK_LABEL_ORDER[config.task])
+    unexpected_labels = sorted(set(frame["consensus_label"]) - expected_labels)
+    if unexpected_labels:
+        raise BaselineDataError(
+            f"Unexpected {config.task} labels: {unexpected_labels}"
+        )
+
+    frame = frame.loc[
+        frame["evidence_tier"].isin(eligible_evidence_tiers)
+    ].copy()
     frame["split"] = frame["split"].astype(str).str.strip().str.lower()
+    frame["type"] = frame["type"].astype(str).str.strip().str.upper()
     frame["model_text"] = _build_model_text(frame, config.text_representation)
-    frame = frame.loc[frame["model_text"].ne("")].copy()
+    missing_text = frame["model_text"].eq("")
+    if missing_text.any():
+        examples = frame.loc[missing_text, "post_key"].head(5).tolist()
+        raise BaselineDataError(
+            f"Eligible rows are missing model text. Examples: {examples}"
+        )
 
     if frame.empty:
         raise BaselineDataError(
@@ -157,11 +216,31 @@ def prepare_task_frame(
             f"Accepted {config.task} rows are missing splits: {missing_splits}"
         )
 
+    invalid_partition = (
+        frame["split"].isin({"train", "validation"}) & frame["type"].ne("MAIN")
+    ) | (frame["split"].eq("test") & frame["type"].ne("IAA"))
+    if invalid_partition.any():
+        examples = frame.loc[
+            invalid_partition,
+            ["post_key", "split", "type"],
+        ].head(5).to_dict(orient="records")
+        raise BaselineDataError(
+            "Split/partition contract violated: train and validation must be MAIN, "
+            f"and test must be IAA. Examples: {examples}"
+        )
+
     duplicated = frame["post_key"].duplicated(keep=False)
     if duplicated.any():
         examples = frame.loc[duplicated, "post_key"].head(5).tolist()
         raise BaselineDataError(
             "A task must contain at most one row per post_key. "
+            f"Examples: {examples}"
+        )
+    duplicated_uids = frame["post_uid"].duplicated(keep=False)
+    if duplicated_uids.any():
+        examples = frame.loc[duplicated_uids, "post_uid"].head(5).tolist()
+        raise BaselineDataError(
+            "A task must contain at most one row per post_uid. "
             f"Examples: {examples}"
         )
 
@@ -217,7 +296,11 @@ def _make_pipeline(
     )
 
 
-def _prediction_table(model: Pipeline, frame: pd.DataFrame) -> pd.DataFrame:
+def _prediction_table(
+    model: Pipeline,
+    frame: pd.DataFrame,
+    config: BaselineConfig,
+) -> pd.DataFrame:
     predictions = model.predict(frame["model_text"])
     probabilities = model.predict_proba(frame["model_text"])
     classes = model.named_steps["classifier"].classes_
@@ -225,19 +308,30 @@ def _prediction_table(model: Pipeline, frame: pd.DataFrame) -> pd.DataFrame:
     result = frame[
         [
             "post_key",
+            "post_uid",
+            "subtask",
             "source_language",
+            "type",
             "split",
             "consensus_label",
-            "model_text",
+            "evidence_tier",
         ]
     ].copy()
     result = result.rename(columns={"consensus_label": "true_label"})
     result["predicted_label"] = predictions
-    result["prediction_confidence"] = probabilities.max(axis=1)
+    result["text_representation"] = config.text_representation
+    result["max_class_probability"] = probabilities.max(axis=1)
 
+    probability_columns: set[str] = set()
     for index, label in enumerate(classes):
         safe_label = str(label).replace(" ", "_").replace("/", "_")
-        result[f"probability__{safe_label}"] = probabilities[:, index]
+        column = f"probability__{safe_label}"
+        if column in probability_columns:
+            raise BaselineDataError(
+                f"Probability column collision for class label {label!r}"
+            )
+        probability_columns.add(column)
+        result[column] = probabilities[:, index]
 
     return result
 
@@ -264,8 +358,18 @@ def _evaluate(
 
     metrics: dict[str, object] = {
         "rows": int(len(predictions)),
+        "metric_label_order": label_order,
         "macro_f1": float(
             f1_score(true, predicted, labels=label_order, average="macro", zero_division=0)
+        ),
+        "observed_support_macro_f1": float(
+            f1_score(
+                true,
+                predicted,
+                labels=[label for label in label_order if (true == label).any()],
+                average="macro",
+                zero_division=0,
+            )
         ),
         "accuracy": float((true == predicted).mean()),
         "classification_report": report,
@@ -297,6 +401,7 @@ def run_baseline_experiment(
     input_path: str | Path,
     output_root: str | Path,
     config: BaselineConfig,
+    overwrite: bool = False,
 ) -> BaselineRunResult:
     """Select on validation, evaluate once on IAA test, and save all artifacts."""
 
@@ -304,13 +409,18 @@ def run_baseline_experiment(
     output_dir = Path(output_root) / config.task / config.text_representation
     if not input_path.exists():
         raise FileNotFoundError(f"Modeling table not found: {input_path}")
+    if output_dir.exists() and any(output_dir.iterdir()) and not overwrite:
+        raise FileExistsError(
+            f"Output directory is not empty: {output_dir}. "
+            "Choose another output root or explicitly allow overwrite."
+        )
 
     table = pd.read_parquet(input_path)
     frame = prepare_task_frame(table, config)
     train = frame.loc[frame["split"].eq("train")].copy()
     validation = frame.loc[frame["split"].eq("validation")].copy()
     test = frame.loc[frame["split"].eq("test")].copy()
-    label_order = sorted(frame["consensus_label"].unique().tolist())
+    label_order = TASK_LABEL_ORDER[config.task]
 
     selection_rows: list[dict[str, object]] = []
     best_model: Pipeline | None = None
@@ -354,14 +464,14 @@ def run_baseline_experiment(
     if best_model is None or best_key is None:
         raise RuntimeError("Model selection produced no candidate model")
 
-    validation_predictions = _prediction_table(best_model, validation)
+    validation_predictions = _prediction_table(best_model, validation, config)
     validation_metrics, validation_matrix = _evaluate(
         validation_predictions,
         label_order,
     )
 
     # Test data is touched only after validation has selected the final candidate.
-    test_predictions = _prediction_table(best_model, test)
+    test_predictions = _prediction_table(best_model, test, config)
     test_metrics, test_matrix = _evaluate(test_predictions, label_order)
 
     output_dir.mkdir(parents=True, exist_ok=True)

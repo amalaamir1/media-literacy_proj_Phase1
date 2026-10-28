@@ -1,6 +1,13 @@
 """Constants describing the official FIGNEWS release schemas."""
 
-POST_KEY_COLUMNS = ("batch", "source_language", "id", "type")
+FIGNEWS_CONTEXT_COLUMNS = ("batch", "source_language", "id", "type")
+POST_KEY_COLUMNS = FIGNEWS_CONTEXT_COLUMNS
+POST_UID_COLUMNS = ("source_language", "id")
+POST_KEY_SEPARATOR = "::"
+EXPECTED_PARTITIONS = frozenset({"MAIN", "IAA"})
+EXPECTED_SOURCE_LANGUAGES = frozenset(
+    {"Arabic", "English", "French", "Hebrew", "Hindi"}
+)
 
 BIAS_LABELS = (
     "biased against palestine",
@@ -30,18 +37,50 @@ NOT_APPLICABLE_LABELS = frozenset(
 )
 
 LONG_REQUIRED_COLUMNS = (
-    *POST_KEY_COLUMNS,
-    "subtask",
+    *FIGNEWS_CONTEXT_COLUMNS,
+    "team_name",
+    "sheet_type",
+    "annotator_id",
+    "task",
     "label",
-    "text",
+    "notes",
 )
 
-SOURCE_REQUIRED_COLUMNS = (
+SOURCE_RELEASE_COLUMNS = (
     "batch",
     "source_language",
     "id",
     "type",
     "text",
+    "english_mt",
+    "arabic_mt",
+    "annotator_id",
+    "bias",
+    "propaganda",
+    "comments",
+)
+
+SOURCE_REQUIRED_COLUMNS = SOURCE_RELEASE_COLUMNS[:7]
+SOURCE_MODEL_COLUMNS = SOURCE_REQUIRED_COLUMNS
+
+FLAT_HEADER_COLUMNS = (
+    "batch",
+    "source_language",
+    "id",
+    "type",
+    "",
+    "biased against palestine",
+    "biased against israel",
+    "biased against both palestine and israel",
+    "biased against others",
+    "unbiased",
+    "not applicable",
+    "unclear",
+    "",
+    "propaganda",
+    "not propaganda",
+    "not applicable",
+    "unclear",
 )
 
 FLAT_POSITIONAL_COLUMNS = (

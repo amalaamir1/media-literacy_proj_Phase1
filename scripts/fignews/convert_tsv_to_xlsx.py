@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import csv
 import re
 from pathlib import Path
@@ -17,12 +18,34 @@ FILES = (
 )
 
 
-def convert_file(filename: str) -> None:
-    source = RAW_DIR / filename
-    output = OUTPUT_DIR / filename.replace(
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create Unicode-safe Excel inspection copies of FIGNEWS text files."
+    )
+    parser.add_argument("--raw-dir", type=Path, default=RAW_DIR)
+    parser.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
+    parser.add_argument("--files", nargs="+", default=list(FILES))
+    parser.add_argument("--overwrite", action="store_true")
+    return parser.parse_args()
+
+
+def convert_file(
+    filename: str,
+    *,
+    raw_dir: Path,
+    output_dir: Path,
+    overwrite: bool,
+) -> None:
+    source = raw_dir / filename
+    output = output_dir / filename.replace(
         ".tsv",
         "-UNICODE.xlsx",
     )
+    if output.exists() and not overwrite:
+        raise FileExistsError(
+            f"Refusing to overwrite existing export: {output}. "
+            "Use --overwrite explicitly."
+        )
 
     df = pd.read_csv(
         source,
@@ -77,10 +100,16 @@ def convert_file(filename: str) -> None:
 
 
 def main() -> None:
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    for filename in FILES:
-        convert_file(filename)
+    for filename in args.files:
+        convert_file(
+            filename,
+            raw_dir=args.raw_dir,
+            output_dir=args.output_dir,
+            overwrite=args.overwrite,
+        )
 
 
 if __name__ == "__main__":

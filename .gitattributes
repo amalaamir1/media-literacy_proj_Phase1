@@ -1,0 +1,5 @@
+* text=auto eol=lf
+data/raw/** binary
+*.xlsx binary
+*.parquet binary
+*.joblib binary

@@ -8,17 +8,23 @@ import pandas as pd
 from .common import (
     FignewsSchemaError,
     build_post_key,
+    build_post_uid,
     normalize_column_name,
     normalize_label,
     normalize_subtask,
     read_delimited,
-    require_columns,
+    require_exact_columns,
     text_sha256,
+    validate_post_identity,
 )
 from .constants import (
+    BIAS_LABELS,
+    FLAT_HEADER_COLUMNS,
     FLAT_POSITIONAL_COLUMNS,
     LONG_REQUIRED_COLUMNS,
-    SOURCE_REQUIRED_COLUMNS,
+    PROPAGANDA_LABELS,
+    SOURCE_MODEL_COLUMNS,
+    SOURCE_RELEASE_COLUMNS,
 )
 
 
@@ -30,11 +36,7 @@ def read_long_annotations(path: str | Path) -> pd.DataFrame:
         normalize_column_name(column) for column in frame.columns
     ]
 
-    # The official metrics script says `task`; the dataset uses `subtask`.
-    if "task" in frame.columns and "subtask" not in frame.columns:
-        frame = frame.rename(columns={"task": "subtask"})
-
-    require_columns(
+    require_exact_columns(
         frame,
         list(LONG_REQUIRED_COLUMNS),
         table_name="FIGNEWS long annotations",
@@ -43,10 +45,47 @@ def read_long_annotations(path: str | Path) -> pd.DataFrame:
     for column in LONG_REQUIRED_COLUMNS:
         frame[column] = frame[column].astype(str).str.strip()
 
-    frame["subtask"] = frame["subtask"].map(normalize_subtask)
+    frame["type"] = frame["type"].str.upper()
+    validate_post_identity(frame, table_name="FIGNEWS long annotations")
+    frame["subtask"] = frame["task"].map(normalize_subtask)
     frame["label_normalized"] = frame["label"].map(normalize_label)
+
+    unexpected_subtasks = sorted(set(frame["subtask"]) - {"bias", "propaganda"})
+    if unexpected_subtasks:
+        raise FignewsSchemaError(
+            "FIGNEWS long annotations contain unexpected tasks: "
+            f"{unexpected_subtasks}"
+        )
+
+    allowed_labels = {
+        "bias": set(BIAS_LABELS),
+        "propaganda": set(PROPAGANDA_LABELS),
+    }
+    invalid_labels = frame.loc[
+        ~frame.apply(
+            lambda row: row["label_normalized"]
+            in allowed_labels[str(row["subtask"])],
+            axis=1,
+        ),
+        ["subtask", "label"],
+    ]
+    if not invalid_labels.empty:
+        examples = invalid_labels.head(5).to_dict(orient="records")
+        raise FignewsSchemaError(
+            "FIGNEWS long annotations contain labels outside the task taxonomy. "
+            f"Examples: {examples}"
+        )
+
     frame["post_key"] = build_post_key(frame)
-    frame["text_sha256"] = frame["text"].map(text_sha256)
+    frame["post_uid"] = build_post_uid(frame)
+
+    uid_mappings = frame.groupby("post_uid")["post_key"].nunique()
+    if uid_mappings.gt(1).any():
+        examples = uid_mappings[uid_mappings.gt(1)].index[:5].tolist()
+        raise FignewsSchemaError(
+            "Long annotations map a post_uid to multiple source records. "
+            f"Examples: {examples}"
+        )
 
     return frame
 
@@ -83,22 +122,42 @@ def read_source_texts(
     if partition not in {"MAIN", "IAA"}:
         raise ValueError("partition must be MAIN or IAA")
 
-    if "type" not in frame.columns:
-        frame["type"] = partition
-
-    frame["type"] = frame["type"].replace("", partition)
-
-    require_columns(
+    require_exact_columns(
         frame,
-        list(SOURCE_REQUIRED_COLUMNS),
+        list(SOURCE_RELEASE_COLUMNS),
         table_name=f"FIGNEWS {partition} source texts",
     )
 
-    for column in SOURCE_REQUIRED_COLUMNS:
+    for column in SOURCE_RELEASE_COLUMNS:
         frame[column] = frame[column].astype(str).str.strip()
 
     frame["type"] = frame["type"].str.upper()
+    validate_post_identity(
+        frame,
+        table_name=f"FIGNEWS {partition} source texts",
+    )
+    unexpected_partition_rows = frame["type"].ne(partition)
+    if unexpected_partition_rows.any():
+        examples = frame.loc[
+            unexpected_partition_rows,
+            ["batch", "source_language", "id", "type"],
+        ].head(5).to_dict(orient="records")
+        raise FignewsSchemaError(
+            f"FIGNEWS {partition} source file contains rows from another "
+            f"partition. Examples: {examples}"
+        )
+
+    for column in ("text", "english_mt", "arabic_mt"):
+        if frame[column].eq("").any():
+            raise FignewsSchemaError(
+                f"FIGNEWS {partition} source texts contain empty {column} values"
+            )
+
+    # Annotation/export-only columns are intentionally excluded from the
+    # modeling table so future feature code cannot accidentally consume them.
+    frame = frame.loc[:, SOURCE_MODEL_COLUMNS].copy()
     frame["post_key"] = build_post_key(frame)
+    frame["post_uid"] = build_post_uid(frame)
     frame["text_sha256"] = frame["text"].map(text_sha256)
 
     if frame["post_key"].duplicated().any():
@@ -106,6 +165,12 @@ def read_source_texts(
         raise FignewsSchemaError(
             f"{partition} source file contains "
             f"{duplicate_count} duplicate post keys"
+        )
+    if frame["post_uid"].duplicated().any():
+        duplicate_count = int(frame["post_uid"].duplicated().sum())
+        raise FignewsSchemaError(
+            f"{partition} source file contains "
+            f"{duplicate_count} duplicate post_uid values"
         )
 
     return frame
@@ -130,6 +195,15 @@ def read_source_corpus(
 
         raise FignewsSchemaError(
             "Post keys overlap between MAIN and IAA: "
+            f"{duplicates[:5].tolist()}"
+        )
+    if frame["post_uid"].duplicated().any():
+        duplicates = frame.loc[
+            frame["post_uid"].duplicated(keep=False),
+            "post_uid",
+        ].unique()
+        raise FignewsSchemaError(
+            "Post UIDs overlap between MAIN and IAA: "
             f"{duplicates[:5].tolist()}"
         )
 
@@ -162,10 +236,18 @@ def read_flat_votes(path: str | Path) -> pd.DataFrame:
 
     expected_columns = len(FLAT_POSITIONAL_COLUMNS)
 
-    if raw.shape[1] < expected_columns:
+    if raw.shape[1] != expected_columns:
         raise FignewsSchemaError(
             f"Flat vote file has {raw.shape[1]} columns; "
-            f"expected at least {expected_columns}"
+            f"expected exactly {expected_columns}"
+        )
+
+    actual_header = tuple(normalize_label(value) for value in raw.iloc[0].tolist())
+    if actual_header != FLAT_HEADER_COLUMNS:
+        raise FignewsSchemaError(
+            "Flat vote file header does not match the FIGNEWS 2024 schema. "
+            f"Expected: {list(FLAT_HEADER_COLUMNS)}; "
+            f"actual: {list(actual_header)}"
         )
 
     frame = raw.iloc[1:, :expected_columns].copy()
@@ -201,11 +283,17 @@ def read_flat_votes(path: str | Path) -> pd.DataFrame:
         frame[column] = frame[column].astype(str).str.strip()
 
     frame["type"] = frame["type"].str.upper()
+    validate_post_identity(frame, table_name="FIGNEWS flat votes")
     frame["post_key"] = build_post_key(frame)
+    frame["post_uid"] = build_post_uid(frame)
 
     if frame["post_key"].duplicated().any():
         raise FignewsSchemaError(
             "Flat vote file contains duplicate post keys"
+        )
+    if frame["post_uid"].duplicated().any():
+        raise FignewsSchemaError(
+            "Flat vote file contains duplicate post_uid values"
         )
 
     return frame

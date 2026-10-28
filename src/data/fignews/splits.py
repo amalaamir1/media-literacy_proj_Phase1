@@ -11,6 +11,7 @@ from .common import FignewsSchemaError
 REQUIRED_MODELING_COLUMNS = frozenset(
     {
         "post_key",
+        "post_uid",
         "type",
         "source_language",
         "subtask",
@@ -71,7 +72,7 @@ def _post_level_view(
         )
 
     metadata_counts = modeling_table.groupby("post_key")[
-        ["type", "source_language"]
+        ["post_uid", "type", "source_language"]
     ].nunique(dropna=False)
     if (metadata_counts > 1).any(axis=None):
         raise FignewsSchemaError(
@@ -94,7 +95,7 @@ def _post_level_view(
     )
 
     metadata = (
-        working[["post_key", "type", "source_language"]]
+        working[["post_key", "post_uid", "type", "source_language"]]
         .drop_duplicates("post_key")
         .set_index("post_key")
     )
@@ -228,6 +229,7 @@ def build_split_manifest(
 
     manifest_columns = [
         "post_key",
+        "post_uid",
         "type",
         "source_language",
         "bias_target",
@@ -252,6 +254,8 @@ def build_split_manifest(
 
     if manifest["post_key"].duplicated().any():
         raise FignewsSchemaError("Split manifest contains duplicate post keys")
+    if manifest["post_uid"].duplicated().any():
+        raise FignewsSchemaError("Split manifest contains duplicate post_uid values")
 
     return manifest
 
@@ -262,8 +266,58 @@ def attach_split_manifest(
 ) -> pd.DataFrame:
     """Attach one post-level split assignment to both modeling task rows."""
 
+    if "post_key" not in modeling_table.columns:
+        raise FignewsSchemaError("Modeling table is missing post_key")
+
+    required_manifest_columns = {"post_key", "post_uid", "split"}
+    missing_columns = sorted(required_manifest_columns - set(manifest.columns))
+    if missing_columns:
+        raise FignewsSchemaError(
+            f"Split manifest is missing columns: {missing_columns}"
+        )
+
     if manifest["post_key"].duplicated().any():
         raise FignewsSchemaError("Split manifest must have one row per post_key")
+    if manifest["post_uid"].duplicated().any():
+        raise FignewsSchemaError("Split manifest must have one row per post_uid")
+
+    unexpected_splits = sorted(
+        set(manifest["split"].astype(str)) - {"train", "validation", "test"}
+    )
+    if unexpected_splits:
+        raise FignewsSchemaError(
+            f"Split manifest contains unexpected split values: {unexpected_splits}"
+        )
+
+    modeling_keys = set(modeling_table["post_key"].astype(str))
+    manifest_keys = set(manifest["post_key"].astype(str))
+    missing_keys = modeling_keys - manifest_keys
+    extra_keys = manifest_keys - modeling_keys
+    if missing_keys or extra_keys:
+        raise FignewsSchemaError(
+            "Split manifest keys do not exactly match the modeling table. "
+            f"Missing examples: {sorted(missing_keys)[:5]}; "
+            f"extra examples: {sorted(extra_keys)[:5]}"
+        )
+
+    modeling_uid_map = (
+        modeling_table[["post_key", "post_uid"]]
+        .drop_duplicates()
+        .set_index("post_key")["post_uid"]
+        .astype(str)
+    )
+    if modeling_uid_map.duplicated().any():
+        raise FignewsSchemaError(
+            "Modeling table maps multiple post keys to the same post_uid"
+        )
+    manifest_uid_map = manifest.set_index("post_key")["post_uid"].astype(str)
+    mismatched_uids = modeling_uid_map.ne(manifest_uid_map)
+    if mismatched_uids.any():
+        examples = mismatched_uids[mismatched_uids].index[:5].tolist()
+        raise FignewsSchemaError(
+            "Split manifest post_uid values do not match the modeling table. "
+            f"Examples: {examples}"
+        )
 
     split_columns = ["post_key", "split"]
     result = modeling_table.merge(

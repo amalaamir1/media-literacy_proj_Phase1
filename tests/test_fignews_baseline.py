@@ -32,11 +32,16 @@ def sample_table() -> pd.DataFrame:
             rows.append(
                 {
                     "post_key": f"post-{index}",
+                    "post_uid": f"English::{index}",
                     "subtask": task,
                     "consensus_status": "accepted",
                     "consensus_label": label,
                     "source_language": "Arabic" if index % 2 else "English",
+                    "type": "IAA" if split == "test" else "MAIN",
                     "split": split,
+                    "evidence_tier": (
+                        "gold_iaa" if split == "test" else "silver_consensus"
+                    ),
                     "text": f"original example {index}",
                     "english_mt": f"english example {index}",
                     "arabic_mt": f"arabic example {index}",
@@ -46,11 +51,14 @@ def sample_table() -> pd.DataFrame:
     rows.append(
         {
             "post_key": "excluded",
+            "post_uid": "English::excluded",
             "subtask": "bias",
             "consensus_status": "tie",
             "consensus_label": None,
             "source_language": "English",
+            "type": "MAIN",
             "split": "train",
+            "evidence_tier": "uncertain",
             "text": "do not train on this",
             "english_mt": "do not train on this",
             "arabic_mt": "do not train on this",
@@ -111,3 +119,35 @@ def test_end_to_end_run_saves_reproducible_artifacts(tmp_path) -> None:
     assert (result.output_dir / "validation_metrics.json").exists()
     assert (result.output_dir / "test_metrics.json").exists()
     assert (result.output_dir / "test_predictions.csv").exists()
+
+    predictions = pd.read_csv(result.output_dir / "test_predictions.csv")
+    assert "model_text" not in predictions.columns
+    assert "max_class_probability" in predictions.columns
+
+
+def test_split_partition_contract_is_enforced() -> None:
+    frame = sample_table()
+    frame.loc[
+        frame["split"].eq("test") & frame["subtask"].eq("bias"),
+        "type",
+    ] = "MAIN"
+
+    with pytest.raises(BaselineDataError, match="Split/partition contract"):
+        prepare_task_frame(frame, BaselineConfig(task="bias"))
+
+
+def test_evidence_tier_policy_is_explicit() -> None:
+    frame = sample_table()
+    frame.loc[
+        frame["split"].eq("train")
+        & frame["subtask"].eq("propaganda")
+        & frame["consensus_label"].eq("propaganda"),
+        "evidence_tier",
+    ] = "bronze_single"
+    config = BaselineConfig(
+        task="propaganda",
+        eligible_evidence_tiers=("silver_consensus", "gold_iaa"),
+    )
+
+    with pytest.raises(BaselineDataError, match="at least two labels"):
+        prepare_task_frame(frame, config)

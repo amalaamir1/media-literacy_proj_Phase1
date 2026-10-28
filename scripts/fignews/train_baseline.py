@@ -46,6 +46,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-features", type=int, default=50_000)
     parser.add_argument("--min-df", type=int, default=2)
+    parser.add_argument(
+        "--eligible-evidence-tiers",
+        nargs="+",
+        choices=("bronze_single", "silver_consensus", "gold_iaa"),
+        default=["bronze_single", "silver_consensus", "gold_iaa"],
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Allow replacing artifacts in an existing task output directory.",
+    )
     return parser.parse_args()
 
 
@@ -60,11 +71,13 @@ def main() -> None:
             random_seed=args.seed,
             max_features=args.max_features,
             min_df=args.min_df,
+            eligible_evidence_tiers=tuple(args.eligible_evidence_tiers),
         )
         result = run_baseline_experiment(
             input_path=args.input,
             output_root=args.output_root,
             config=config,
+            overwrite=args.overwrite,
         )
         printable = asdict(result)
         printable["output_dir"] = str(result.output_dir.resolve())
