@@ -53,6 +53,17 @@ def parse_args() -> argparse.Namespace:
         default=["bronze_single", "silver_consensus", "gold_iaa"],
     )
     parser.add_argument(
+        "--calibration-method",
+        choices=("none", "sigmoid", "isotonic"),
+        default="none",
+        help=(
+            "Probability calibration fitted by cross-validation on training "
+            "data only. The default preserves the reference baseline."
+        ),
+    )
+    parser.add_argument("--calibration-cv", type=int, default=5)
+    parser.add_argument("--calibration-bins", type=int, default=10)
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Allow replacing artifacts in an existing task output directory.",
@@ -72,6 +83,9 @@ def main() -> None:
             max_features=args.max_features,
             min_df=args.min_df,
             eligible_evidence_tiers=tuple(args.eligible_evidence_tiers),
+            calibration_method=args.calibration_method,
+            calibration_cv=args.calibration_cv,
+            calibration_bins=args.calibration_bins,
         )
         result = run_baseline_experiment(
             input_path=args.input,

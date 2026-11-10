@@ -8,15 +8,18 @@ import platform
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import joblib
+import numpy as np
 import pandas as pd
 import sklearn
 from data.fignews.constants import BIAS_LABELS, PROPAGANDA_LABELS
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, f1_score
+from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
 
 
@@ -27,6 +30,17 @@ TextRepresentation = Literal[
     "arabic_translation",
     "original_plus_english",
 ]
+CalibrationMethod = Literal["none", "sigmoid", "isotonic"]
+
+
+class ProbabilityModel(Protocol):
+    """Minimal estimator interface used by prediction artifact generation."""
+
+    classes_: np.ndarray
+
+    def predict(self, values: pd.Series) -> np.ndarray: ...
+
+    def predict_proba(self, values: pd.Series) -> np.ndarray: ...
 
 REQUIRED_COLUMNS = frozenset(
     {
@@ -72,6 +86,9 @@ class BaselineConfig:
     c_values: tuple[float, ...] = (0.5, 1.0, 2.0)
     ngram_ranges: tuple[tuple[int, int], ...] = ((1, 1), (1, 2))
     eligible_evidence_tiers: tuple[str, ...] = DEFAULT_ELIGIBLE_EVIDENCE_TIERS
+    calibration_method: CalibrationMethod = "none"
+    calibration_cv: int = 5
+    calibration_bins: int = 10
 
 
 @dataclass(frozen=True)
@@ -82,6 +99,7 @@ class BaselineRunResult:
     text_representation: str
     selected_c: float
     selected_ngram_range: tuple[int, int]
+    calibration_method: str
     validation_macro_f1: float
     test_macro_f1: float
     output_dir: Path
@@ -296,14 +314,19 @@ def _make_pipeline(
     )
 
 
+def _probability_column(label: str) -> str:
+    safe_label = str(label).replace(" ", "_").replace("/", "_")
+    return f"probability__{safe_label}"
+
+
 def _prediction_table(
-    model: Pipeline,
+    model: ProbabilityModel,
     frame: pd.DataFrame,
     config: BaselineConfig,
 ) -> pd.DataFrame:
     predictions = model.predict(frame["model_text"])
     probabilities = model.predict_proba(frame["model_text"])
-    classes = model.named_steps["classifier"].classes_
+    classes = model.classes_
 
     result = frame[
         [
@@ -324,8 +347,7 @@ def _prediction_table(
 
     probability_columns: set[str] = set()
     for index, label in enumerate(classes):
-        safe_label = str(label).replace(" ", "_").replace("/", "_")
-        column = f"probability__{safe_label}"
+        column = _probability_column(str(label))
         if column in probability_columns:
             raise BaselineDataError(
                 f"Probability column collision for class label {label!r}"
@@ -336,9 +358,101 @@ def _prediction_table(
     return result
 
 
+def _expected_calibration_error(
+    predictions: pd.DataFrame,
+    *,
+    bins: int,
+) -> float:
+    if bins < 2:
+        raise BaselineDataError("calibration_bins must be at least 2")
+
+    confidence = predictions["max_class_probability"].to_numpy(dtype=float)
+    correct = (
+        predictions["true_label"].to_numpy()
+        == predictions["predicted_label"].to_numpy()
+    ).astype(float)
+    bin_ids = np.minimum((confidence * bins).astype(int), bins - 1)
+    ece = 0.0
+    for bin_id in range(bins):
+        mask = bin_ids == bin_id
+        if not mask.any():
+            continue
+        ece += float(mask.mean()) * abs(
+            float(correct[mask].mean()) - float(confidence[mask].mean())
+        )
+    return float(ece)
+
+
+def _metric_summary(
+    predictions: pd.DataFrame,
+    label_order: list[str],
+    *,
+    calibration_bins: int,
+) -> dict[str, object]:
+    true = predictions["true_label"]
+    predicted = predictions["predicted_label"]
+    observed_labels = [label for label in label_order if (true == label).any()]
+    probability_matrix = np.column_stack(
+        [
+            predictions.get(
+                _probability_column(label),
+                pd.Series(0.0, index=predictions.index),
+            ).to_numpy(dtype=float)
+            for label in label_order
+        ]
+    )
+    target_matrix = np.column_stack(
+        [(true == label).to_numpy(dtype=float) for label in label_order]
+    )
+
+    return {
+        "rows": int(len(predictions)),
+        "macro_f1": float(
+            f1_score(
+                true,
+                predicted,
+                labels=label_order,
+                average="macro",
+                zero_division=0,
+            )
+        ),
+        "observed_support_macro_f1": float(
+            f1_score(
+                true,
+                predicted,
+                labels=observed_labels,
+                average="macro",
+                zero_division=0,
+            )
+        ),
+        "accuracy": float((true == predicted).mean()),
+        "multiclass_brier_score": float(
+            np.mean(np.sum((probability_matrix - target_matrix) ** 2, axis=1))
+        ),
+        "log_loss": float(
+            -np.mean(
+                np.sum(
+                    target_matrix
+                    * np.log(np.clip(probability_matrix, 1e-15, 1.0)),
+                    axis=1,
+                )
+            )
+        ),
+        "expected_calibration_error": _expected_calibration_error(
+            predictions,
+            bins=calibration_bins,
+        ),
+        "label_support": {
+            label: int((true == label).sum()) for label in label_order
+        },
+    }
+
+
 def _evaluate(
     predictions: pd.DataFrame,
     label_order: list[str],
+    *,
+    calibration_bins: int,
 ) -> tuple[dict[str, object], pd.DataFrame]:
     true = predictions["true_label"]
     predicted = predictions["predicted_label"]
@@ -357,28 +471,93 @@ def _evaluate(
     )
 
     metrics: dict[str, object] = {
-        "rows": int(len(predictions)),
+        **_metric_summary(
+            predictions,
+            label_order,
+            calibration_bins=calibration_bins,
+        ),
         "metric_label_order": label_order,
-        "macro_f1": float(
-            f1_score(true, predicted, labels=label_order, average="macro", zero_division=0)
-        ),
-        "observed_support_macro_f1": float(
-            f1_score(
-                true,
-                predicted,
-                labels=[label for label in label_order if (true == label).any()],
-                average="macro",
-                zero_division=0,
-            )
-        ),
-        "accuracy": float((true == predicted).mean()),
         "classification_report": report,
         "rows_by_language": {
             str(key): int(value)
             for key, value in predictions["source_language"].value_counts().items()
         },
+        "metrics_by_language": {
+            str(language): _metric_summary(
+                language_frame,
+                label_order,
+                calibration_bins=calibration_bins,
+            )
+            for language, language_frame in predictions.groupby(
+                "source_language",
+                sort=True,
+            )
+        },
     }
     return metrics, matrix_frame
+
+
+def _write_language_metrics_csv(path: Path, metrics: dict[str, object]) -> None:
+    rows: list[dict[str, object]] = []
+    by_language = metrics["metrics_by_language"]
+    if not isinstance(by_language, dict):
+        raise TypeError("metrics_by_language must be a dictionary")
+    for language, values in by_language.items():
+        if not isinstance(values, dict):
+            raise TypeError("Per-language metrics must be dictionaries")
+        row = {
+            "source_language": language,
+            **{key: value for key, value in values.items() if key != "label_support"},
+            **{
+                f"support__{label}": count
+                for label, count in values["label_support"].items()
+            },
+        }
+        rows.append(row)
+    pd.DataFrame(rows).sort_values("source_language").to_csv(path, index=False)
+
+
+def _fit_final_model(
+    *,
+    config: BaselineConfig,
+    selected_c: float,
+    selected_ngram: tuple[int, int],
+    train: pd.DataFrame,
+    selected_model: Pipeline,
+) -> ProbabilityModel:
+    if config.calibration_method == "none":
+        return selected_model
+    if config.calibration_method not in {"sigmoid", "isotonic"}:
+        raise BaselineDataError(
+            f"Unsupported calibration method: {config.calibration_method}"
+        )
+    if config.calibration_cv < 2:
+        raise BaselineDataError("calibration_cv must be at least 2")
+
+    class_counts = train["consensus_label"].value_counts()
+    too_small = class_counts.loc[class_counts.lt(config.calibration_cv)]
+    if not too_small.empty:
+        raise BaselineDataError(
+            "Calibration cross-validation has too few training examples for "
+            f"{config.calibration_cv} folds: {too_small.to_dict()}"
+        )
+
+    base_model = _make_pipeline(
+        config,
+        c_value=selected_c,
+        ngram_range=selected_ngram,
+    )
+    calibrated = CalibratedClassifierCV(
+        estimator=base_model,
+        method=config.calibration_method,
+        cv=StratifiedKFold(
+            n_splits=config.calibration_cv,
+            shuffle=True,
+            random_state=config.random_seed,
+        ),
+    )
+    calibrated.fit(train["model_text"], train["consensus_label"])
+    return calibrated
 
 
 def _sha256(path: Path) -> str:
@@ -464,18 +643,32 @@ def run_baseline_experiment(
     if best_model is None or best_key is None:
         raise RuntimeError("Model selection produced no candidate model")
 
-    validation_predictions = _prediction_table(best_model, validation, config)
+    selected_c, selected_ngram = best_key
+    final_model = _fit_final_model(
+        config=config,
+        selected_c=selected_c,
+        selected_ngram=selected_ngram,
+        train=train,
+        selected_model=best_model,
+    )
+
+    validation_predictions = _prediction_table(final_model, validation, config)
     validation_metrics, validation_matrix = _evaluate(
         validation_predictions,
         label_order,
+        calibration_bins=config.calibration_bins,
     )
 
     # Test data is touched only after validation has selected the final candidate.
-    test_predictions = _prediction_table(best_model, test, config)
-    test_metrics, test_matrix = _evaluate(test_predictions, label_order)
+    test_predictions = _prediction_table(final_model, test, config)
+    test_metrics, test_matrix = _evaluate(
+        test_predictions,
+        label_order,
+        calibration_bins=config.calibration_bins,
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    joblib.dump(best_model, output_dir / "model.joblib")
+    joblib.dump(final_model, output_dir / "model.joblib")
     pd.DataFrame(selection_rows).sort_values(
         ["validation_macro_f1", "ngram_max", "c"],
         ascending=[False, True, True],
@@ -494,8 +687,15 @@ def run_baseline_experiment(
     test_matrix.to_csv(output_dir / "test_confusion_matrix.csv")
     _write_json(output_dir / "validation_metrics.json", validation_metrics)
     _write_json(output_dir / "test_metrics.json", test_metrics)
+    _write_language_metrics_csv(
+        output_dir / "validation_metrics_by_language.csv",
+        validation_metrics,
+    )
+    _write_language_metrics_csv(
+        output_dir / "test_metrics_by_language.csv",
+        test_metrics,
+    )
 
-    selected_c, selected_ngram = best_key
     run_config = {
         **asdict(config),
         "ngram_ranges": [list(value) for value in config.ngram_ranges],
@@ -515,6 +715,11 @@ def run_baseline_experiment(
         "training_rule": "accepted consensus labels; train split only",
         "selection_rule": "highest validation macro F1; deterministic tie-break",
         "test_rule": "IAA test evaluated once after model selection",
+        "calibration_rule": (
+            "uncalibrated probabilities"
+            if config.calibration_method == "none"
+            else "calibrator fitted by stratified cross-validation on train only"
+        ),
     }
     _write_json(output_dir / "run_config.json", run_config)
 
@@ -523,6 +728,7 @@ def run_baseline_experiment(
         text_representation=config.text_representation,
         selected_c=selected_c,
         selected_ngram_range=selected_ngram,
+        calibration_method=config.calibration_method,
         validation_macro_f1=float(validation_metrics["macro_f1"]),
         test_macro_f1=float(test_metrics["macro_f1"]),
         output_dir=output_dir,

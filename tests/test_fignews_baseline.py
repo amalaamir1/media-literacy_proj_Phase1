@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
@@ -119,10 +121,17 @@ def test_end_to_end_run_saves_reproducible_artifacts(tmp_path) -> None:
     assert (result.output_dir / "validation_metrics.json").exists()
     assert (result.output_dir / "test_metrics.json").exists()
     assert (result.output_dir / "test_predictions.csv").exists()
+    assert (result.output_dir / "test_metrics_by_language.csv").exists()
 
     predictions = pd.read_csv(result.output_dir / "test_predictions.csv")
     assert "model_text" not in predictions.columns
     assert "max_class_probability" in predictions.columns
+    metrics = json.loads(
+        (result.output_dir / "test_metrics.json").read_text(encoding="utf-8")
+    )
+    assert set(metrics["metrics_by_language"]) == {"Arabic", "English"}
+    assert "expected_calibration_error" in metrics
+    assert "multiclass_brier_score" in metrics
 
 
 def test_split_partition_contract_is_enforced() -> None:
@@ -151,3 +160,29 @@ def test_evidence_tier_policy_is_explicit() -> None:
 
     with pytest.raises(BaselineDataError, match="at least two labels"):
         prepare_task_frame(frame, config)
+
+
+def test_sigmoid_calibration_is_fitted_on_training_data(tmp_path) -> None:
+    input_path = tmp_path / "modeling_table_with_splits.parquet"
+    sample_table().to_parquet(input_path, index=False)
+    config = BaselineConfig(
+        task="propaganda",
+        min_df=1,
+        c_values=(1.0,),
+        ngram_ranges=((1, 1),),
+        calibration_method="sigmoid",
+        calibration_cv=2,
+    )
+
+    result = run_baseline_experiment(
+        input_path=input_path,
+        output_root=tmp_path / "artifacts",
+        config=config,
+    )
+
+    run_config = json.loads(
+        (result.output_dir / "run_config.json").read_text(encoding="utf-8")
+    )
+    assert result.calibration_method == "sigmoid"
+    assert run_config["calibration_method"] == "sigmoid"
+    assert "train only" in run_config["calibration_rule"]

@@ -111,6 +111,42 @@ python -m scripts.fignews.train_baseline `
 Existing task output directories are not overwritten unless `--overwrite` is
 explicitly supplied. Prefer a new output root for policy experiments.
 
+To run the reference and consensus-only policies side by side:
+
+```powershell
+python -m scripts.fignews.compare_training_policies
+```
+
+The comparison uses sigmoid calibration by default, writes each policy to a
+separate artifact directory, and saves `policy_comparison.csv` with row counts,
+validation/test scores, calibration diagnostics, and deltas from the reference
+policy. Use `--calibration-method none` to compare the original uncalibrated
+models instead.
+
+### 4. Evaluate languages and probability quality
+
+Every baseline run now writes `validation_metrics_by_language.csv` and
+`test_metrics_by_language.csv`. These include per-language taxonomy macro F1,
+observed-support macro F1, accuracy, label support, multiclass Brier score, log
+loss, and expected calibration error. Aggregate JSON metrics contain the same
+probability diagnostics.
+
+Calibration is opt-in for ordinary baseline runs and never uses validation or
+test labels. It is fitted by stratified cross-validation within the training
+split:
+
+```powershell
+python -m scripts.fignews.train_baseline `
+  --task both `
+  --calibration-method sigmoid `
+  --output-root <new-output-directory>
+```
+
+Keep `--calibration-method none` when exact reproduction of the original
+baseline is required. Prefer sigmoid over isotonic for the current dataset
+unless a separate validation experiment demonstrates that isotonic calibration
+is more reliable.
+
 ## Current reference results
 
 | Task | Validation macro F1 | IAA-test macro F1 |
