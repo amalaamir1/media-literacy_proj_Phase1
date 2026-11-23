@@ -22,8 +22,8 @@ REQUIRED_MODELING_COLUMNS = frozenset(
 EXPECTED_SUBTASKS = frozenset({"bias", "propaganda"})
 
 
-def _stable_score(post_key: str, seed: int) -> str:
-    value = f"{seed}:{post_key}".encode("utf-8")
+def _stable_score(post_uid: str, seed: int) -> str:
+    value = f"{seed}:{post_uid}".encode("utf-8")
     return hashlib.sha256(value).hexdigest()
 
 
@@ -52,7 +52,7 @@ def _post_level_view(
             f"Modeling table is missing split columns: {missing}"
         )
 
-    duplicated = modeling_table.duplicated(["post_key", "subtask"], keep=False)
+    duplicated = modeling_table.duplicated(["post_uid", "subtask"], keep=False)
     if duplicated.any():
         examples = (
             modeling_table.loc[duplicated, ["post_key", "subtask"]]
@@ -63,7 +63,7 @@ def _post_level_view(
             f"Duplicate post/subtask rows found. Examples: {examples}"
         )
 
-    task_sets = modeling_table.groupby("post_key")["subtask"].agg(frozenset)
+    task_sets = modeling_table.groupby("post_uid")["subtask"].agg(frozenset)
     invalid_tasks = task_sets[task_sets != EXPECTED_SUBTASKS]
     if not invalid_tasks.empty:
         raise FignewsSchemaError(
@@ -71,19 +71,19 @@ def _post_level_view(
             f"Invalid post examples: {invalid_tasks.index[:5].tolist()}"
         )
 
-    metadata_counts = modeling_table.groupby("post_key")[
-        ["post_uid", "type", "source_language"]
+    metadata_counts = modeling_table.groupby("post_uid")[
+        ["post_key", "type", "source_language"]
     ].nunique(dropna=False)
     if (metadata_counts > 1).any(axis=None):
         raise FignewsSchemaError(
-            "Partition and source language must be constant within each post_key"
+            "Source metadata must be constant within each post_uid"
         )
 
     working = modeling_table.copy()
     working["split_target"] = working.apply(_target_value, axis=1)
 
     targets = working.pivot(
-        index="post_key",
+        index="post_uid",
         columns="subtask",
         values="split_target",
     ).rename_axis(columns=None)
@@ -96,8 +96,8 @@ def _post_level_view(
 
     metadata = (
         working[["post_key", "post_uid", "type", "source_language"]]
-        .drop_duplicates("post_key")
-        .set_index("post_key")
+        .drop_duplicates("post_uid")
+        .set_index("post_uid")
     )
     posts = metadata.join(targets, how="inner").reset_index()
     posts["type"] = posts["type"].astype(str).str.strip().str.upper()
@@ -207,15 +207,15 @@ def build_split_manifest(
         main,
         validation_fraction=validation_fraction,
     )
-    main["stable_score"] = main["post_key"].map(
-        lambda key: _stable_score(str(key), seed)
+    main["stable_score"] = main["post_uid"].map(
+        lambda uid: _stable_score(str(uid), seed)
     )
     main["split"] = "train"
 
     for stratum, group in main.groupby("stratification_key", sort=True):
         validation_count = allocations[stratum]
         validation_indices = group.sort_values(
-            ["stable_score", "post_key"]
+            ["stable_score", "post_uid"]
         ).index[:validation_count]
         main.loc[validation_indices, "split"] = "validation"
 
@@ -223,7 +223,7 @@ def build_split_manifest(
     posts["random_seed"] = seed
     posts["validation_fraction"] = validation_fraction
     posts["split_strategy"] = (
-        "post_key; MAIN=train_validation; IAA=test; "
+        "post_uid; MAIN=train_validation; IAA=test; "
         "stratified=language+bias_target+propaganda_target"
     )
 
@@ -248,7 +248,7 @@ def build_split_manifest(
     )
     manifest["split"] = manifest["split"].astype(split_order)
     manifest = manifest.sort_values(
-        ["split", "source_language", "post_key"]
+        ["split", "source_language", "post_uid"]
     ).reset_index(drop=True)
     manifest["split"] = manifest["split"].astype(str)
 
@@ -266,8 +266,8 @@ def attach_split_manifest(
 ) -> pd.DataFrame:
     """Attach one post-level split assignment to both modeling task rows."""
 
-    if "post_key" not in modeling_table.columns:
-        raise FignewsSchemaError("Modeling table is missing post_key")
+    if "post_uid" not in modeling_table.columns:
+        raise FignewsSchemaError("Modeling table is missing post_uid")
 
     required_manifest_columns = {"post_key", "post_uid", "split"}
     missing_columns = sorted(required_manifest_columns - set(manifest.columns))
@@ -289,8 +289,8 @@ def attach_split_manifest(
             f"Split manifest contains unexpected split values: {unexpected_splits}"
         )
 
-    modeling_keys = set(modeling_table["post_key"].astype(str))
-    manifest_keys = set(manifest["post_key"].astype(str))
+    modeling_keys = set(modeling_table["post_uid"].astype(str))
+    manifest_keys = set(manifest["post_uid"].astype(str))
     missing_keys = modeling_keys - manifest_keys
     extra_keys = manifest_keys - modeling_keys
     if missing_keys or extra_keys:
@@ -303,26 +303,26 @@ def attach_split_manifest(
     modeling_uid_map = (
         modeling_table[["post_key", "post_uid"]]
         .drop_duplicates()
-        .set_index("post_key")["post_uid"]
+        .set_index("post_uid")["post_key"]
         .astype(str)
     )
-    if modeling_uid_map.duplicated().any():
+    if not modeling_uid_map.index.is_unique:
         raise FignewsSchemaError(
-            "Modeling table maps multiple post keys to the same post_uid"
+            "Modeling table maps a post_uid to multiple post keys"
         )
-    manifest_uid_map = manifest.set_index("post_key")["post_uid"].astype(str)
+    manifest_uid_map = manifest.set_index("post_uid")["post_key"].astype(str)
     mismatched_uids = modeling_uid_map.ne(manifest_uid_map)
     if mismatched_uids.any():
         examples = mismatched_uids[mismatched_uids].index[:5].tolist()
         raise FignewsSchemaError(
-            "Split manifest post_uid values do not match the modeling table. "
+            "Split manifest post_key values do not match the modeling table. "
             f"Examples: {examples}"
         )
 
-    split_columns = ["post_key", "split"]
+    split_columns = ["post_uid", "split"]
     result = modeling_table.merge(
         manifest[split_columns],
-        on="post_key",
+        on="post_uid",
         how="left",
         validate="many_to_one",
         indicator=True,

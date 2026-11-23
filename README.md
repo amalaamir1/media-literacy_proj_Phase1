@@ -86,6 +86,9 @@ python -m scripts.fignews.create_splits
 MAIN posts are deterministically divided into train and validation. IAA posts
 are reserved for test. Both task rows for a post always receive the same split.
 The split profile records the input hash and a content-stable manifest hash.
+The allocation hash uses `seed` and `post_uid`; changing the legacy `post_key`
+does not change split membership. This is a new split policy, so the historical
+reference metrics below do not describe runs produced by this policy.
 
 Paths and split settings are configurable through `--input`, `--output-dir`,
 `--profile`, `--validation-fraction`, `--seed`, and `--min-stratum-size`.
@@ -147,7 +150,7 @@ baseline is required. Prefer sigmoid over isotonic for the current dataset
 unless a separate validation experiment demonstrates that isotonic calibration
 is more reliable.
 
-## Current reference results
+## Historical reference results (legacy `post_key` split policy)
 
 | Task | Validation macro F1 | IAA-test macro F1 |
 |---|---:|---:|
@@ -174,6 +177,11 @@ uncalibrated and must not be presented as user confidence.
   modeling table.
 - Split manifests must match the modeling-table post keys exactly.
 - Train/validation rows must come from MAIN and test rows from IAA.
+
+`post_uid` is the operational post identifier for consensus grouping, source
+joining, split allocation, and split attachment. Regenerate the modeling table,
+split manifest, and baseline artifacts together before comparing local and
+Databricks runs. Existing generated split artifacts use the historical policy.
 
 `post_key` remains the compatibility identifier
 `batch::source_language::id::type`. It is retained so existing splits,

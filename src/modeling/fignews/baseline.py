@@ -263,7 +263,7 @@ def prepare_task_frame(
         )
 
     split_sets = {
-        split: set(frame.loc[frame["split"].eq(split), "post_key"])
+        split: set(frame.loc[frame["split"].eq(split), "post_uid"])
         for split in EXPECTED_SPLITS
     }
     if (
@@ -271,7 +271,7 @@ def prepare_task_frame(
         or split_sets["train"] & split_sets["test"]
         or split_sets["validation"] & split_sets["test"]
     ):
-        raise BaselineDataError("post_key overlap detected between dataset splits")
+        raise BaselineDataError("post_uid overlap detected between dataset splits")
 
     train_labels = set(frame.loc[frame["split"].eq("train"), "consensus_label"])
     if len(train_labels) < 2:

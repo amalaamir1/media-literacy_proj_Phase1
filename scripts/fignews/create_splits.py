@@ -39,7 +39,7 @@ def _sha256(path: Path) -> str:
 
 
 def _manifest_fingerprint(manifest: pd.DataFrame) -> str:
-    canonical = manifest.sort_values("post_key").to_csv(
+    canonical = manifest.sort_values("post_uid").to_csv(
         index=False,
         lineterminator="\n",
     )

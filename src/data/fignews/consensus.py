@@ -207,8 +207,8 @@ def build_consensus_from_long(
 
     records: list[dict[str, object]] = []
 
-    for (post_key, subtask), group in working.groupby(
-        ["post_key", "subtask"],
+    for (post_uid, subtask), group in working.groupby(
+        ["post_uid", "subtask"],
         sort=True,
     ):
         first = group.iloc[0]
@@ -233,8 +233,8 @@ def build_consensus_from_long(
 
         records.append(
             {
-                "post_key": post_key,
-                "post_uid": first["post_uid"],
+                "post_key": first["post_key"],
+                "post_uid": post_uid,
                 "subtask": normalized_subtask,
                 "batch": first.get("batch"),
                 "source_language": first["source_language"],

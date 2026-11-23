@@ -53,6 +53,16 @@ def test_manifest_is_reproducible() -> None:
     pd.testing.assert_frame_equal(first, second)
 
 
+def test_split_assignment_depends_on_post_uid_not_legacy_key() -> None:
+    frame = sample_modeling_table()
+    original = build_split_manifest(frame, seed=42).set_index("post_uid")["split"]
+    renamed = frame.copy()
+    renamed["post_key"] = "NEW::" + renamed["post_key"]
+    updated = build_split_manifest(renamed, seed=42).set_index("post_uid")["split"]
+
+    pd.testing.assert_series_equal(original.sort_index(), updated.sort_index())
+
+
 def test_both_subtasks_receive_the_same_post_split() -> None:
     frame = sample_modeling_table()
     manifest = build_split_manifest(frame)

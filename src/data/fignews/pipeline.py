@@ -37,14 +37,14 @@ def join_consensus_with_text(
         table_name="FIGNEWS source corpus",
     )
 
-    if source_posts["post_key"].duplicated().any():
+    if source_posts["post_uid"].duplicated().any():
         raise FignewsSchemaError(
-            "Source corpus must contain one row per post key"
+            "Source corpus must contain one row per post_uid"
         )
 
     result = consensus.merge(
         source_posts,
-        on="post_key",
+        on="post_uid",
         how="left",
         suffixes=("_consensus", ""),
         validate="many_to_one",
@@ -61,6 +61,12 @@ def join_consensus_with_text(
             f"Examples: {examples}"
         )
 
+    mismatched_key = result["post_key_consensus"].astype(str).ne(
+        result["post_key"].astype(str)
+    )
+    if mismatched_key.any():
+        raise FignewsSchemaError("Consensus/source post_key mismatch")
+
     for column in POST_KEY_COLUMNS:
         consensus_column = f"{column}_consensus"
         mismatched = result[consensus_column].astype(str).ne(
@@ -76,21 +82,9 @@ def join_consensus_with_text(
                 f"Examples: {examples}"
             )
 
-    mismatched_uid = result["post_uid_consensus"].astype(str).ne(
-        result["post_uid"].astype(str)
-    )
-    if mismatched_uid.any():
-        examples = result.loc[
-            mismatched_uid,
-            ["post_key", "post_uid_consensus", "post_uid"],
-        ].head(5).to_dict(orient="records")
-        raise FignewsSchemaError(
-            f"Consensus/source post_uid mismatch. Examples: {examples}"
-        )
-
     redundant_columns = [f"{column}_consensus" for column in POST_KEY_COLUMNS]
     return result.drop(
-        columns=["_merge", "post_uid_consensus", *redundant_columns]
+        columns=["_merge", "post_key_consensus", *redundant_columns]
     )
 
 
